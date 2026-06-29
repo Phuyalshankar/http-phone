@@ -142,6 +142,24 @@ npm test
   - `hw_result:webrtc_mic_data` handler को सबै `console.log` हटाइयो र string split logic optimize गरियो।
   - `app:accept_call` action ले अब `(action, val, deviceId)` parameters लिन्छ।
 
+### ६. Audio Routing Wrong WebSocket Bug Fix (Resolved — 2026-06-29)
+- **समस्या**: Audio call connect हुँदा पनि अर्को device मा audio सुनिँदैनथ्यो। `subscribeToPartnerAudio` र `hw_result:webrtc_mic_data` दुवैले `app.realtime.publish/subscribe` use गर्थे — जो `/phone` signaling endpoint मा जान्छ। तर server को `/phone` handler (`signalingOrchestrator`) ले `audio_stream/*` pub/sub handle गर्दैन, केवल INVITE/ACCEPT/REJECT/SDP/ICE मात्र handle गर्छ। तसर्थ सम्पूर्ण audio data हराउँथ्यो।
+- **कारण (३ वटा)**:
+  1. **Wrong WebSocket channel**: `app.realtime.publish/subscribe` → `/phone` → `signalingOrchestrator` → audio topics ignore हुन्थे।
+  2. **Server-side pub handler missing**: `/realtime` server handler मा client-originated `pub` type messages को कुनै handling थिएन।
+  3. **Cleanup bug**: `cleanupCallSession` ले `app.realtime.unsubscribe` call गर्थ्यो जुन `/phone` मा जान्थ्यो — actual subscription unsubscribe हुँदैनथ्यो।
+- **समाधान**:
+  - `subscribeToPartnerAudio`: `app.realtime.subscribe` को सट्टा `wsInst.wsClient.send({ type: 'sub', topic: 'audio_stream/ext' })` — `/realtime` WebSocket बाट subscribe।
+  - `hw_result:webrtc_mic_data`: `app.realtime.publish` को सट्टा `wsInst.wsClient.send({ type: 'pub', topic: 'audio_stream/ext', payload: {...} })` — `/realtime` बाट publish।
+  - `cleanupCallSession`: `app.realtime.unsubscribe` को सट्टा `wsInst.wsClient.send({ type: 'unsub', topic: '...' })`।
+  - `initWebSocket` message handler मा `audio_stream/` topic handler थपियो।
+  - `realtime.ts` मा `payload.type === 'pub'` को handling थपियो — `rt.publish(payload.topic, payload.payload)` call गर्ने।
+
+### ७. Incoming Call Partner Name Fix (Resolved — 2026-06-29)
+- **समस्या**: Incoming call आउँदा receiver को screen मा caller को नाम "Extension 104" जस्तो देखिन्थ्यो — वास्तविक नाम देखिँदैनथ्यो।
+- **कारण**: `setupSignalingListeners` को `incoming_call` handler ले directory lookup नगरी सिधै `Extension ${from}` set गर्थ्यो।
+- **समाधान**: `incoming_call` handler मा `directory_users` state बाट extension match गरी real name lookup गरिने भयो।
+
 ### ५. Call Audio Silent + Volume Buttons Not Working Fix (Resolved — 2026-06-26)
 - **समस्या**: Call connect भए पनि audio सुनिँदैनथ्यो। Mobile को volume button ले call volume control गर्दैनथ्यो (media volume मात्र बदलिन्थ्यो)।
 - **कारणहरू (३ वटा)**:
