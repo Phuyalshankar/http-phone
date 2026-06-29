@@ -1,0 +1,19 @@
+{
+  "name": "http-phone",
+  "version": "1.0.0",
+  "description": "Dolphin mobile app — http-phone",
+  "main": "app.jsx",
+  "scripts": {
+    "dev": "dolphin dev",
+    "build": "dolphin build",
+    "build:android": "dolphin build --android"
+  },
+  "dependencies": {
+    "dolphin-native": "file:d:/dolphin-native"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.6",
+    "@babel/plugin-transform-react-jsx": "^7.24.6",
+    "@babel/register": "^7.24.6"
+  }
+}

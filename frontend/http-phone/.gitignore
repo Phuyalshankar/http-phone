@@ -1,0 +1,4 @@
+node_modules/
+dist/
+*.dolp
+.dolphin-android/

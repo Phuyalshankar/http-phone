@@ -1,0 +1,145 @@
+# Dolphin Framework: 0 to 100% Full Tutorial (Nepali) 🐬 [v2.11.4]
+
+Dolphin Framework मा तपाईँलाई स्वागत छ! यो गाइडमा हामी Dolphin प्रयोग गरेर एउटा शक्तिशाली, आधुनिक र एआई-संचालित (AI-Powered) ब्याकइन्ड कसरी बनाउने भनेर सिक्नेछौँ।
+
+---
+
+## १. Dolphin के हो? (Introduction)
+
+**Dolphin** एउटा "Zero-Dependency" ब्याकइन्ड फ्रेमवर्क हो। यो २०२६ को आधुनिक आवश्यकताहरूका लागि तयार पारिएको छ। अहिले यसमा **Cursor-Level Agentic AI** थपिएको छ, जसले गर्दा तपाईँको कोडिङ अनुभव पूर्ण रूपमा बदलिनेछ।
+
+**मुख्य विशेषताहरू:**
+- **Advanced AI Agent**: प्रोजेक्ट बुझ्ने र आफैं कोड लेख्ने एजेन्ट।
+- **Ultra-Fast**: एक्सप्रेस (Express) भन्दा ५ गुणा सम्म छिटो।
+- **Multi-Model Support**: Gemini, Groq (Llama 3), र Local Ollama सपोर्ट।
+- **ESM Ready**: आधुनिक `import/export` सिन्ट्याक्समा आधारित।
+
+---
+
+## २. सुरुवाती सेटअप र एआई (Project Setup & AI)
+
+Dolphin v2.11.4 मा एआईको प्रयोग गरेर १ मिनेटमै प्रोजेक्ट तयार गर्न सकिन्छ:
+
+```bash
+# १. नयाँ फोल्डर बनाउनुहोस्
+mkdir my-dolphin-app && cd my-dolphin-app
+
+# २. एआई एजेन्ट सुरु गर्नुहोस् (Cursor Mode)
+# यसले तपाईँको कुरा बुझ्छ र कोड लेख्न मद्दत गर्छ
+npx dolphin chat
+
+# ३. एआई मार्फत पूर्ण प्रोजेक्ट स्ट्रक्चर बनाउनुहोस्
+npx dolphin generate-full "e-commerce backend with orders and mongoose"
+```
+
+---
+
+## ३. एआई एजेन्टसँग कुरा गर्ने (Chatting with Agent)
+
+Dolphin Agent ले अहिले **Roman Nepali** बुझ्छ। तपाईँले यसरी सोध्न सक्नुहुन्छ:
+
+> "Hey Dolphin, `real-test` फोल्डरमा एउटा नयाँ `order.js` मोडल बनाइदेऊ र `app.js` मा त्यसको रुट थपिदेऊ।"
+
+एजेन्टले तपाईँको प्रोजेक्टका सबै फाइलहरू हेर्छ र सिधै कोड अपडेट गरिदिन्छ। यसका लागि कुनै पनि `require` प्रयोग नगर्नुहोस्, सधैँ **`import`** प्रयोग गर्नुहोस्।
+
+---
+
+## ४. पहिलो सर्भर (Modern ESM Server)
+
+हामी आधुनिक `import` सिन्ट्याक्स मात्र प्रयोग गर्छौं, किनभने `require` ले पुराना समस्याहरू निम्त्याउन सक्छ।
+
+```javascript
+import { createDolphinServer } from 'dolphin-server-modules/server';
+
+const app = createDolphinServer();
+
+// एउटा सामान्य गेट (GET) रूट
+app.get('/', (ctx) => {
+  return { 
+    message: "Dolphin ko sansar ma swagat chha! 🐬", 
+    version: "2.11.4",
+    mode: "Agentic AI Ready"
+  };
+});
+
+// सर्भर सुन्न (Listen) सुरु गर्नुहोस्
+app.listen(3000, () => {
+  console.log("Server http://localhost:3000 ma chaliraheko chha!");
+});
+```
+
+---
+
+## ५. एआई बिनाका शक्तिशाली कमाण्डहरू
+
+यदि तपाईँलाई एआई प्रयोग गर्न मन छैन भने, डल्फिनमा पहिले देखि नै बनेका टेम्पलेटहरू प्रयोग गर्न सक्नुहुन्छ:
+
+```bash
+# अथेन्टिकेसन सिस्टम थप्न
+npx dolphin add auth
+
+# कुनै मोडलको लागि CRUD थप्न
+npx dolphin add crud Product
+
+# मङ्गोस (Mongoose) सेटअप गर्न
+npx dolphin add adapter mongoose
+```
+
+---
+
+## ६. लोकल एआई (Ollama Support) [NEW]
+
+यदि तपाईँ आफ्नो डेटा क्लाउडमा पठाउन चाहनुहुन्न भने, आफ्नो कम्प्युटरमै **Ollama** चलाउन सक्नुहुन्छ। `.env` फाइलमा यो सेट गर्नुहोस्:
+
+```env
+USE_OLLAMA=true
+OLLAMA_MODEL=gemma3:latest
+```
+
+---
+
+## ७. Hookless Data Management (autoBroadcast) [NEW]
+
+Dolphin मा अब `autoBroadcast` सुविधा थपिएको छ। यसको मद्दतले तपाईँले React मा `useState`, `useEffect`, वा `onSubmit` लेख्नै पर्दैन।
+
+```jsx
+import { useSyncExternalStore } from 'react';
+import { DolphinClient } from 'dolphin-server-modules/client';
+
+// १. autoBroadcast अन गर्नुहोस्
+const dolphin = new DolphinClient('http://localhost:3000', 'dev', { autoBroadcast: true });
+
+function ProductApp() {
+  // २. डेटा आफैँ सिंक (Sync) हुन्छ
+  const products = useSyncExternalStore(
+    (listener) => dolphin.store.subscribe(listener),
+    () => dolphin.store.getSnapshot('products')
+  );
+
+  return (
+    <div>
+      {/* ३. Hookless फर्म: यसले आफैँ API कल गर्छ र सबै प्रयोगकर्तालाई Realtime मा अपडेट पठाउँछ */}
+      <form data-api-submit="POST /api/products">
+        <input name="name" placeholder="प्रोडक्टको नाम" required />
+        <button type="submit">थप्नुहोस्</button>
+      </form>
+
+      <ul>
+        {products.items.map(p => <li key={p.id}>{p.name}</li>)}
+      </ul>
+    </div>
+  );
+}
+```
+
+---
+
+## ८. अन्तिममा (Conclusion)
+
+Dolphin Framework अब एउटा सामान्य फ्रेमवर्क मात्र होइन, यो तपाईँको एउटा "एआई साथी" पनि हो। यसले तपाईँको कोडिङ स्पिड १० गुणा बढाउन मद्दत गर्छ।
+
+**थप जानकारीको लागि:**
+- [README.md](README.md) हेर्नुहोस्।
+- [Dolphin Master Guide](DOLPHIN_MASTER_GUIDE_NEPALI.md) पढ्नुहोस्।
+
+**Happy Coding in Nepali! 🇳🇵🐬**
