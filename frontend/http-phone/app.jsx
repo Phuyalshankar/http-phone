@@ -624,7 +624,7 @@ function initWebSocket(token, userId, deviceId = null) {
     });
     
     wsClientInstance.on('close', (code, reason) => {
-        app.framework.deviceContextStore.run(activeDeviceId, () => {
+        app.framework.deviceContextStore.run(activeDeviceId, async () => {
             console.log(`[WS-${activeDeviceId}] Connection closed. Code: ${code}, Reason: ${reason || 'None'}.`);
             updateGlobalWsState('disconnected');
             if (inst.pingInterval) {
@@ -638,20 +638,39 @@ function initWebSocket(token, userId, deviceId = null) {
             }
             inst.wsClient = null;
 
-            // Temporary: Disable aggressive WS auto-logout because it causes 
-            // unexpected logouts during temporary network/Wi-Fi drops on mobile.
-            /*
-            if (code === 4000 || code === 4001) {
-                console.log(`[WS-${activeDeviceId}] Auth failed on WebSocket connect. Logging out...`);
-                app.state('auth_error', 'Session expired. Please log in again.');
-                clearSession(activeDeviceId);
-                if (global.dolphinActiveSessions) {
-                    delete global.dolphinActiveSessions[activeDeviceId];
+            if (!app.getState('isLoggedIn')) return;
+
+            // Code 4000 = JWT expired/invalid — try to refresh token first
+            if (code === 4000) {
+                console.log(`[WS-${activeDeviceId}] Token expired (4000) — attempting token refresh...`);
+                try {
+                    // Server expects { refreshToken: '...' } not { token: '...' }
+                    const storedRefreshToken = app.getState('refreshToken') ||
+                        (global.dolphinActiveSessions && global.dolphinActiveSessions[activeDeviceId]?.refreshToken) || '';
+                    const refreshRes = await fetch(`http://${LOCAL_IP}:3000/api/auth/refresh`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ refreshToken: storedRefreshToken })
+                    });
+                    if (refreshRes.ok) {
+                        const refreshData = await refreshRes.json();
+                        const newToken = refreshData.accessToken || refreshData.token;
+                        if (newToken) {
+                            console.log(`[WS-${activeDeviceId}] Token refreshed successfully — reconnecting...`);
+                            app.state('accessToken', newToken);
+                            // Update saved session too
+                            if (global.dolphinActiveSessions && global.dolphinActiveSessions[activeDeviceId]) {
+                                global.dolphinActiveSessions[activeDeviceId].accessToken = newToken;
+                            }
+                            initWebSocket(newToken, userId, activeDeviceId);
+                            return;
+                        }
+                    }
+                    console.warn(`[WS-${activeDeviceId}] Token refresh failed (${refreshRes.status}) — retrying in 8s with old token`);
+                } catch (e) {
+                    console.error(`[WS-${activeDeviceId}] Token refresh error:`, e.message);
                 }
-                handleLogout(app);
-                return;
             }
-            */
 
             console.log(`[WS-${activeDeviceId}] Retrying connect in 8 seconds...`);
             inst.retryTimeout = setTimeout(() => {
@@ -806,10 +825,13 @@ app.action('login_submit', async (action, val, deviceId) => {
         global.dolphinActiveSessions[deviceId] = {
             isLoggedIn: true,
             accessToken: data.accessToken,
+            refreshToken: data.refreshToken || '',
             userId: data.user.id,
             userName: data.user.name,
             userExt: data.user.extension
         };
+        // Also save refreshToken in app state
+        if (data.refreshToken) app.state('refreshToken', data.refreshToken);
         
         // Start Websocket and Signaling connection
         initWebSocket(data.accessToken, data.user.id, deviceId);
