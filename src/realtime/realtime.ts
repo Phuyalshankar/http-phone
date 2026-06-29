@@ -165,8 +165,12 @@ export async function handleRealtimeConnection(ws: WebSocket, token: string, dev
             extension: user.extension,
             isTyping: payload.isTyping
           });
+        } else if (payload.type === 'pub' && payload.topic) {
+          // Client-originated publish — used for audio_stream/* VoIP audio relay
+          // Route to all subscribers of this topic via RealtimeCore
+          rt.publish(payload.topic, payload.payload);
         } else {
-          // Standard pub/sub payload handling
+          // Standard pub/sub payload handling (sub, unsub, etc.)
           await rt.handle(data, ws, deviceId);
         }
       } catch (err: any) {
