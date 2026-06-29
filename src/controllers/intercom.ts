@@ -1,25 +1,24 @@
 /**
  * Intercom Audio Relay
  *
- * In-memory ring-buffer that relays raw PCM frames between two extensions.
+ * In-memory ring-buffer that relays PCM audio frames between two extensions.
  *
  * DolphinIntercom.kt (Android) POSTs audio via:
  *   POST /api/intercom/audio/push
  *   Headers: X-Device-Id: <myExt>  X-Target-Id: <partnerExt>
- *   Body: raw PCM bytes  (Content-Type: application/octet-stream)
+ *   Body: JSON { audio: "<base64 PCM>", rate: 16000 }
  *
  * And polls audio via:
  *   GET /api/intercom/audio/pull
  *   Headers: X-Device-Id: <myExt>  X-Target-Id: <partnerExt>
- *   Response: raw PCM bytes (Content-Type: application/octet-stream) or 204 if empty
+ *   Response: raw PCM bytes (application/octet-stream) or 204 if empty
  *
- * BUG FIX (2026-06-29):
- *   Previous version stored base64 strings and returned JSON { audio, rate }.
- *   DolphinIntercom.kt sends raw bytes (octet-stream) and reads raw bytes directly
- *   into AudioTrack — it never encoded/decoded base64.
- *   Result: server queue was ALWAYS EMPTY (no audio stored), and pull returned
- *   JSON text that AudioTrack played as garbage noise.
- *   Fix: store raw Buffer, return raw bytes on pull. No base64 needed.
+ * WHY JSON push / raw pull (2026-06-29):
+ *   The Dolphin server framework (dolphin-server-modules/server.ts) consumed the request
+ *   body with Buffer.concat(chunks).toString() BEFORE our handler ran, which silently
+ *   corrupted binary PCM bytes into a garbled string.  Sending JSON/base64 from Kotlin
+ *   lets the framework's JSON parser deliver a clean ctx.body.audio string.
+ *   On pull we return raw bytes directly — AudioTrack.write() needs raw PCM, no JSON wrapper.
  *
  * Buffer key = "<from>:<to>".  Pull reverses the key to get partner's frames.
  */
@@ -31,62 +30,12 @@ if (!global.__intercomRawQueues) {
 }
 const audioQueues: Map<string, Buffer[]> = global.__intercomRawQueues;
 
-// Max frames in queue — 100 × 20ms = 2s buffer max before oldest frames drop
-const MAX_QUEUE_FRAMES = 100;
-// Max frames to drain per pull — prevents sending stale buildup all at once
-const MAX_FRAMES_PER_PULL = 5;
+const MAX_QUEUE_FRAMES  = 100; // 100 × 20 ms = 2 s max backlog before oldest drops
+const MAX_FRAMES_PER_PULL = 5; // drain ≤5 frames per pull to avoid stale-audio dump
 
 function getQueue(key: string): Buffer[] {
     if (!audioQueues.has(key)) audioQueues.set(key, []);
     return audioQueues.get(key)!;
-}
-
-/**
- * Read raw body bytes from ctx, handling three cases:
- *  1. Framework already parsed octet-stream body into ctx.body as a Buffer
- *  2. ctx.body is JSON with { audio: base64 } (legacy fallback)
- *  3. Body stream not yet consumed — read from ctx.req
- */
-async function getRawBody(ctx: any): Promise<Buffer> {
-    const body = ctx.body;
-
-    // Case 1: Framework gave us a Buffer directly
-    if (Buffer.isBuffer(body)) {
-        return body;
-    }
-
-    // Case 2: Legacy JSON with base64 audio (old client versions)
-    if (body && typeof body === 'object' && body.audio) {
-        try {
-            return Buffer.from(body.audio, 'base64');
-        } catch {
-            return Buffer.alloc(0);
-        }
-    }
-
-    // Case 3: Read raw bytes from request stream (octet-stream not parsed by framework)
-    const req = ctx.req;
-    if (!req) return Buffer.alloc(0);
-
-    return new Promise<Buffer>((resolve) => {
-        // Stream already ended — nothing to read
-        if (req.readableEnded || req.destroyed) {
-            resolve(Buffer.alloc(0));
-            return;
-        }
-        const chunks: Buffer[] = [];
-        const onData = (chunk: Buffer) => chunks.push(chunk);
-        const onEnd  = () => { cleanup(); resolve(Buffer.concat(chunks)); };
-        const onErr  = () => { cleanup(); resolve(Buffer.alloc(0)); };
-        const cleanup = () => {
-            req.removeListener('data', onData);
-            req.removeListener('end',  onEnd);
-            req.removeListener('error', onErr);
-        };
-        req.on('data',  onData);
-        req.on('end',   onEnd);
-        req.on('error', onErr);
-    });
 }
 
 export async function pushAudio(ctx: any) {
@@ -99,12 +48,21 @@ export async function pushAudio(ctx: any) {
         return;
     }
 
-    const pcm = await getRawBody(ctx);
+    const body = ctx.body;
+    let pcm: Buffer | null = null;
 
-    if (pcm.length > 0) {
+    // Primary path: JSON { audio: base64, rate: N } — sent by DolphinIntercom.kt
+    if (body && typeof body === 'object' && body.audio) {
+        try { pcm = Buffer.from(body.audio, 'base64'); } catch {}
+    }
+    // Fallback: dolphin-server-modules (fixed) preserves Buffer for octet-stream bodies
+    else if (Buffer.isBuffer(body)) {
+        pcm = body;
+    }
+
+    if (pcm && pcm.length > 0) {
         const queue = getQueue(`${from}:${to}`);
         queue.push(pcm);
-        // Drop oldest frame when buffer is full to prevent memory growth
         if (queue.length > MAX_QUEUE_FRAMES) queue.shift();
     }
 
@@ -123,7 +81,7 @@ export async function pullAudio(ctx: any) {
     }
 
     const queueKey = `${target}:${me}`;
-    const queue = getQueue(queueKey);
+    const queue    = getQueue(queueKey);
 
     if (queue.length === 0) {
         ctx.res.statusCode = 204;
@@ -131,11 +89,11 @@ export async function pullAudio(ctx: any) {
         return;
     }
 
-    // Drain a bounded number of frames — prevents replaying stale audio buildup
-    const frames = queue.splice(0, Math.min(queue.length, MAX_FRAMES_PER_PULL));
+    // Drain a bounded number of frames to avoid replaying stale audio buildup
+    const frames   = queue.splice(0, Math.min(queue.length, MAX_FRAMES_PER_PULL));
     const combined = Buffer.concat(frames);
 
-    // Return raw PCM bytes — DolphinIntercom.kt writes directly to AudioTrack
+    // Return raw PCM bytes — DolphinIntercom.kt writes directly to AudioTrack.write()
     ctx.res.statusCode = 200;
     ctx.res.setHeader('Content-Type', 'application/octet-stream');
     ctx.res.setHeader('Content-Length', combined.length);
