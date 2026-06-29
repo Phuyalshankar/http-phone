@@ -297,43 +297,6 @@ function initSignaling(token, userExt, deviceId = null) {
     });
 }
 
-// Helper: Subscribe to partner's audio stream via /realtime WebSocket (NOT /phone signaling)
-// Bug fix: audio_stream pub/sub must go through /realtime (RealtimeCore), not /phone (signalingOrchestrator)
-function subscribeToPartnerAudio(activeDeviceId, partnerExt) {
-    if (!activeDeviceId || !partnerExt) return;
-    if (!global.dolphinSignalingInstances) return;
-    const inst = global.dolphinSignalingInstances[activeDeviceId];
-    if (!inst) return;
-
-    // Prevent duplicate subscriptions — only subscribe once per partner per call
-    if (inst.audioSubscribedExt === partnerExt) {
-        console.log(`[Audio-${activeDeviceId}] Already subscribed to audio_stream/${partnerExt}, skipping.`);
-        return;
-    }
-
-    // Unsubscribe from any previous partner audio stream via /realtime WebSocket
-    if (inst.audioSubscribedExt) {
-        const prevWsInst = global.dolphinWsInstances && global.dolphinWsInstances[activeDeviceId];
-        if (prevWsInst && prevWsInst.wsClient && prevWsInst.wsClient.readyState === 1) {
-            try {
-                prevWsInst.wsClient.send(JSON.stringify({ type: 'unsub', topic: `audio_stream/${inst.audioSubscribedExt}` }));
-            } catch(e) {}
-        }
-        inst.audioSubscribedExt = null;
-    }
-
-    console.log(`[Audio-${activeDeviceId}] Subscribing to partner audio_stream/${partnerExt} via /realtime WebSocket`);
-    inst.audioSubscribedExt = partnerExt;
-
-    // Subscribe via /realtime WebSocket — audio arrives in initWebSocket's message handler
-    const wsInst = global.dolphinWsInstances && global.dolphinWsInstances[activeDeviceId];
-    if (wsInst && wsInst.wsClient && wsInst.wsClient.readyState === 1) {
-        wsInst.wsClient.send(JSON.stringify({ type: 'sub', topic: `audio_stream/${partnerExt}` }));
-        console.log(`[Audio-${activeDeviceId}] Sent audio_stream/${partnerExt} subscription to /realtime`);
-    } else {
-        console.error(`[Audio-${activeDeviceId}] Cannot subscribe to audio: /realtime WebSocket not open`);
-    }
-}
 
 function setupSignalingListeners(deviceId = null) {
     const activeDeviceId = deviceId || (app.framework && app.framework.deviceContextStore && app.framework.deviceContextStore.getStore()) || 'default';
@@ -403,16 +366,16 @@ function setupSignalingListeners(deviceId = null) {
                 // Stop dial tone now that call is answered
                 app.state('hw', 'ringtone:stop');
                 
-                // Subscribe to partner's audio BEFORE starting hardware stream
-                // to avoid missing the first audio packets (race condition fix)
+                // Start intercom audio — caller side uses intercom:start directly
+                // (WebSocket signaling already handled ACCEPT, no HTTP accept signal needed)
                 const receiverExt = app.getState('call_partner_ext');
-                subscribeToPartnerAudio(activeDeviceId, receiverExt);
+                const callerSelfExt = app.getState('user_ext');
+                app.state('intercom_server', `http://${LOCAL_IP}:3000`);
+                app.state('intercom_device_id', callerSelfExt);
+                app.state('intercom_target_id', receiverExt);
+                app.state('hw', 'intercom:start');
                 // Default to speaker for video call
                 app.state('call_speaker', 'on');
-                app.state('hw', 'webrtc:speaker:on');
-                
-                // Start WebRTC audio stream on hardware
-                app.state('hw', 'webrtc:start');
                 
                 // Start duration timer
                 startCallTimer(activeDeviceId);
@@ -491,10 +454,6 @@ function startCallTimer(deviceId = null) {
 function cleanupCallSession(deviceId = null) {
     const activeDeviceId = deviceId || (app.framework && app.framework.deviceContextStore && app.framework.deviceContextStore.getStore()) || 'default';
     
-    if (global.dolphinMicLogCounts) {
-        global.dolphinMicLogCounts[activeDeviceId] = 0;
-    }
-    
     if (global.dolphinCallInstances && global.dolphinCallInstances[activeDeviceId]) {
         const inst = global.dolphinCallInstances[activeDeviceId];
         if (inst.durationTimer) {
@@ -503,24 +462,11 @@ function cleanupCallSession(deviceId = null) {
         }
     }
     
-    // Clean up audio subscription so next call gets a fresh subscription
-    // Bug fix: unsubscribe via /realtime WebSocket, not /phone signaling
-    if (global.dolphinSignalingInstances && global.dolphinSignalingInstances[activeDeviceId]) {
-        const sigInst = global.dolphinSignalingInstances[activeDeviceId];
-        if (sigInst.audioSubscribedExt) {
-            const cleanWsInst = global.dolphinWsInstances && global.dolphinWsInstances[activeDeviceId];
-            if (cleanWsInst && cleanWsInst.wsClient && cleanWsInst.wsClient.readyState === 1) {
-                try { cleanWsInst.wsClient.send(JSON.stringify({ type: 'unsub', topic: 'audio_stream/' + sigInst.audioSubscribedExt })); } catch(e) {}
-            }
-            sigInst.audioSubscribedExt = null;
-        }
-    }
-    
     // Stop any active ringtones
     app.state('hw', 'ringtone:stop');
     
-    // Stop WebRTC audio stream on hardware
-    app.state('hw', 'webrtc:stop');
+    // Stop intercom audio streaming (native DolphinIntercom.kt)
+    app.state('hw', 'intercom:stop');
     
     app.state('call_status', 'idle');
     app.state('call_partner_ext', '');
@@ -985,49 +931,10 @@ app.action('app:restore_session', (action, value, deviceId) => {
     }
 });
 
-// WebRTC Audio Relay
-// We use a global counter to throttle logging to every 50 packets to avoid latency/CPU overload
-if (!global.dolphinMicLogCounts) global.dolphinMicLogCounts = {};
-
-app.action('hw_result:webrtc_mic_data', (action, value, deviceId) => {
-    const partnerExt = app.getState('call_partner_ext', deviceId);
-    const isConnected = app.getState('call_status', deviceId) === 'connected';
-    
-    if (!global.dolphinMicLogCounts[deviceId]) global.dolphinMicLogCounts[deviceId] = 0;
-    global.dolphinMicLogCounts[deviceId]++;
-    
-    if (global.dolphinMicLogCounts[deviceId] % 50 === 1) {
-        console.log(`[JS-MIC-${deviceId}] Received mic packet #${global.dolphinMicLogCounts[deviceId]} (len=${value ? value.length : 0}) from Native. isConnected=${isConnected}, partnerExt=${partnerExt}`);
-    }
-    
-    if (!isConnected || !partnerExt || !value) return;
-    
-    let rate = 8000;
-    let audioData = value;
-    if (value.includes(':')) {
-        const colonIdx = value.indexOf(':');
-        const maybeRate = parseInt(value.substring(0, colonIdx), 10);
-        if (!isNaN(maybeRate) && maybeRate > 0) {
-            rate = maybeRate;
-            audioData = value.substring(colonIdx + 1);
-        }
-    }
-    
-    // Bug fix: publish audio via /realtime WebSocket (RealtimeCore pub/sub),
-    // NOT via app.realtime which goes to /phone (signalingOrchestrator doesn't handle audio_stream topics)
-    const micWsInst = global.dolphinWsInstances && global.dolphinWsInstances[deviceId];
-    if (!micWsInst || !micWsInst.wsClient || micWsInst.wsClient.readyState !== 1) return;
-    
-    if (global.dolphinMicLogCounts[deviceId] % 50 === 1) {
-        console.log(`[JS-MIC-${deviceId}] Publishing packet #${global.dolphinMicLogCounts[deviceId]} to topic audio_stream/${app.getState('user_ext', deviceId)} via /realtime`);
-    }
-    
-    micWsInst.wsClient.send(JSON.stringify({
-        type: 'pub',
-        topic: 'audio_stream/' + app.getState('user_ext', deviceId),
-        payload: { from: app.getState('user_ext', deviceId), audio: audioData, rate: rate }
-    }));
-});
+// Audio is now handled entirely by DolphinIntercom.kt (native layer).
+// intercom:start → AudioRecord captures PCM → POST /api/intercom/audio/push
+// Background thread polls GET /api/intercom/audio/pull → AudioTrack plays PCM
+// No JS-level audio relay needed.
 
 // Dialer Keypad Actions
 // Dolphin passes the `value` attribute as the second argument.
@@ -1213,16 +1120,16 @@ app.action('app:accept_call', (action, val, deviceId) => {
     app.screen('VideoCallScreen', VideoCallScreen);
     app.patchScreen('VideoCallScreen');
     
-    // Subscribe to caller's audio stream BEFORE starting hardware
-    // (receiver side: partnerExt is the caller whose audio we want to hear)
+    // Start intercom audio — receiver side uses intercom:start directly
+    // (WebSocket signaling ACCEPT was already sent via app.realtime.accept above)
     const activeDeviceId = deviceId || (app.framework && app.framework.deviceContextStore && app.framework.deviceContextStore.getStore()) || 'default';
-    subscribeToPartnerAudio(activeDeviceId, partnerExt);
+    const receiverSelfExt = app.getState('user_ext');
+    app.state('intercom_server', `http://${LOCAL_IP}:3000`);
+    app.state('intercom_device_id', receiverSelfExt);
+    app.state('intercom_target_id', partnerExt);
+    app.state('hw', 'intercom:start');
     // Default to speaker for video call
     app.state('call_speaker', 'on');
-    app.state('hw', 'webrtc:speaker:on');
-    
-    // Start WebRTC audio stream on hardware
-    app.state('hw', 'webrtc:start');
     
     startCallTimer();
 });
@@ -1231,7 +1138,9 @@ app.action('app:toggle_speaker', () => {
     if (app.getState('call_status') !== 'connected') return;
     const isOn = app.getState('call_speaker') === 'on';
     app.state('call_speaker', isOn ? 'off' : 'on');
-    app.state('hw', isOn ? 'webrtc:speaker:off' : 'webrtc:speaker:on');
+    // intercom:stop+start with speaker state would reset the call; use ringtone:dialtone speaker trick
+    // Instead set speakerphone via audio hw command
+    app.state('hw', isOn ? 'audio:speaker:off' : 'audio:speaker:on');
     app.screen('VideoCallScreen', VideoCallScreen);
     app.patchScreen('VideoCallScreen');
 });
