@@ -374,8 +374,9 @@ function setupSignalingListeners(deviceId = null) {
                 app.state('intercom_device_id', callerSelfExt);
                 app.state('intercom_target_id', receiverExt);
                 app.state('hw', 'intercom:start');
-                // Default to speaker for video call
+                // Default to speaker for video call — send hw command so native AudioManager actually switches
                 app.state('call_speaker', 'on');
+                app.state('hw', 'audio:speaker:on');
                 
                 // Start duration timer
                 startCallTimer(activeDeviceId);
@@ -1150,8 +1151,9 @@ app.action('app:accept_call', (action, val, deviceId) => {
     app.state('intercom_device_id', receiverSelfExt);
     app.state('intercom_target_id', partnerExt);
     app.state('hw', 'intercom:start');
-    // Default to speaker for video call
+    // Default to speaker for video call — send hw command so native AudioManager actually switches
     app.state('call_speaker', 'on');
+    app.state('hw', 'audio:speaker:on');
     
     startCallTimer();
 });
