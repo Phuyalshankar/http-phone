@@ -155,6 +155,22 @@ npm test
   - `initWebSocket` message handler मा `audio_stream/` topic handler थपियो।
   - `realtime.ts` मा `payload.type === 'pub'` को handling थपियो — `rt.publish(payload.topic, payload.payload)` call गर्ने।
 
+### ८. Intercom Audio Protocol Mismatch Fix (Resolved — 2026-06-29)
+- **समस्या**: Call connect भएपछि दुवै device मा audio बिल्कुलै सुनिँदैनथ्यो (complete silence)। यो `DolphinIntercom.kt` र `intercom.ts` server बीचको protocol mismatch थियो।
+- **कारणहरू (२ वटा)**:
+  1. **Push side broken**: `DolphinIntercom.kt` ले raw PCM bytes (`Content-Type: application/octet-stream`) POST गर्थ्यो। तर `intercom.ts` ले `ctx.body.audio` (base64 JSON field) expect गर्थ्यो। Dolphin framework ले octet-stream body JSON parse गर्दैन, त्यसैले `audioB64` सधैँ `''` हुन्थ्यो → **server queue मा एकपनि audio frame store हुँदैनथ्यो**।
+  2. **Pull side broken**: Server ले `JSON.stringify({ audio: base64String, rate: 8000 })` response पठाउँथ्यो। `DolphinIntercom.kt` ले ती bytes सिधै `audioTrack.write()` मा pass गर्थ्यो → **JSON text as PCM = garbage noise वा silence**। साथै, `frames.map(f => f.audio).join('')` गरेर multiple base64 strings concatenate गर्दा corrupted audio हुन्थ्यो (base64 padding बीचमा हुन्छ)।
+- **समाधान** (`intercom.ts` मात्र — Kotlin code correct थियो):
+  - `AudioFrame` type → `Buffer[]` queue मा परिवर्तन।
+  - `pushAudio`: `getRawBody()` helper थपियो जसले (१) Buffer, (२) base64 JSON (legacy), (३) raw req stream — तीनवटै cases handle गर्छ।
+  - `pullAudio`: Raw PCM bytes `application/octet-stream` मा return गर्छ। Maximum ५ frames drain गरेर stale audio buildup रोक्छ।
+  - Hot-reload survive गर्न global cache key `__intercomAudioQueues` → `__intercomRawQueues` मा change।
+
+### ९. Speaker Toggle Handler Missing Fix (Resolved — 2026-06-29)
+- **समस्या**: Call screen मा Speaker button थिचेपछि केही हुँदैनथ्यो। Speaker toggle silently fail हुन्थ्यो।
+- **कारण**: `app:toggle_speaker` action ले `app.state('hw', 'audio:speaker:on')` / `audio:speaker:off` पठाउँथ्यो, तर `DolphinHardwareBridge.kt` को `"audio"` section मा `"speaker"` sub-case नै थिएन।
+- **समाधान**: `DolphinHardwareBridge.kt` को `audio` when-block मा `"speaker"` case थपियो → `audioManager.isSpeakerphoneOn = turnOn`।
+
 ### ७. Incoming Call Partner Name Fix (Resolved — 2026-06-29)
 - **समस्या**: Incoming call आउँदा receiver को screen मा caller को नाम "Extension 104" जस्तो देखिन्थ्यो — वास्तविक नाम देखिँदैनथ्यो।
 - **कारण**: `setupSignalingListeners` को `incoming_call` handler ले directory lookup नगरी सिधै `Extension ${from}` set गर्थ्यो।
