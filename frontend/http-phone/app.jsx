@@ -297,9 +297,10 @@ function initSignaling(token, userExt, deviceId = null) {
     });
 }
 
-// Helper: Subscribe to partner's audio stream (called after call connects)
+// Helper: Subscribe to partner's audio stream via /realtime WebSocket (NOT /phone signaling)
+// Bug fix: audio_stream pub/sub must go through /realtime (RealtimeCore), not /phone (signalingOrchestrator)
 function subscribeToPartnerAudio(activeDeviceId, partnerExt) {
-    if (!activeDeviceId || !partnerExt || !app.realtime) return;
+    if (!activeDeviceId || !partnerExt) return;
     if (!global.dolphinSignalingInstances) return;
     const inst = global.dolphinSignalingInstances[activeDeviceId];
     if (!inst) return;
@@ -310,38 +311,28 @@ function subscribeToPartnerAudio(activeDeviceId, partnerExt) {
         return;
     }
 
-    // Unsubscribe from any previous partner audio stream
+    // Unsubscribe from any previous partner audio stream via /realtime WebSocket
     if (inst.audioSubscribedExt) {
-        try {
-            app.realtime.unsubscribe(`audio_stream/${inst.audioSubscribedExt}`);
-        } catch(e) {}
+        const prevWsInst = global.dolphinWsInstances && global.dolphinWsInstances[activeDeviceId];
+        if (prevWsInst && prevWsInst.wsClient && prevWsInst.wsClient.readyState === 1) {
+            try {
+                prevWsInst.wsClient.send(JSON.stringify({ type: 'unsub', topic: `audio_stream/${inst.audioSubscribedExt}` }));
+            } catch(e) {}
+        }
         inst.audioSubscribedExt = null;
     }
 
-    console.log(`[Audio-${activeDeviceId}] Subscribing to partner audio_stream/${partnerExt}`);
+    console.log(`[Audio-${activeDeviceId}] Subscribing to partner audio_stream/${partnerExt} via /realtime WebSocket`);
     inst.audioSubscribedExt = partnerExt;
 
-    let recvPacketCount = 0;
-    app.realtime.subscribe(`audio_stream/${partnerExt}`, (data) => {
-        recvPacketCount++;
-        const callStatus = app.getState('call_status', activeDeviceId);
-        
-        if (recvPacketCount % 50 === 1) {
-            console.log(`[JS-AUDIO-${activeDeviceId}] Received audio packet #${recvPacketCount} from network (partner ${partnerExt}). Status: ${callStatus}, size: ${data && data.audio ? data.audio.length : 0}`);
-        }
-        
-        // Only play audio if call is still connected
-        if (callStatus !== 'connected') return;
-        if (!data || !data.audio) return;
-        const rate = data.rate || 8000;
-        // Send audio to hardware for playback — no logging here to avoid latency
-        app.framework.deviceContextStore.run(activeDeviceId, () => {
-            if (recvPacketCount % 50 === 1) {
-                console.log(`[JS-AUDIO-${activeDeviceId}] Setting state 'hw' = audio:stream_play:${rate}:<data>`);
-            }
-            app.state('hw', `audio:stream_play:${rate}:${data.audio}`);
-        });
-    });
+    // Subscribe via /realtime WebSocket — audio arrives in initWebSocket's message handler
+    const wsInst = global.dolphinWsInstances && global.dolphinWsInstances[activeDeviceId];
+    if (wsInst && wsInst.wsClient && wsInst.wsClient.readyState === 1) {
+        wsInst.wsClient.send(JSON.stringify({ type: 'sub', topic: `audio_stream/${partnerExt}` }));
+        console.log(`[Audio-${activeDeviceId}] Sent audio_stream/${partnerExt} subscription to /realtime`);
+    } else {
+        console.error(`[Audio-${activeDeviceId}] Cannot subscribe to audio: /realtime WebSocket not open`);
+    }
 }
 
 function setupSignalingListeners(deviceId = null) {
@@ -375,10 +366,15 @@ function setupSignalingListeners(deviceId = null) {
                 console.log(`[Signaling-${activeDeviceId}] Incoming call:`, data);
                 const { from, callType, callLogId } = data;
                 
+                // Look up caller's real name from directory
+                const contacts = app.getState('directory_users') || [];
+                const callerContact = contacts.find(c => c.extension === from);
+                const callerName = callerContact ? callerContact.name : `Extension ${from}`;
+                
                 // Save calling details to state
                 app.state('call_status', 'incoming');
                 app.state('call_partner_ext', from);
-                app.state('call_partner_name', `Extension ${from}`);
+                app.state('call_partner_name', callerName);
                 app.state('call_direction', 'inbound');
                 app.state('call_log_id', callLogId);
                 app.state('call_duration_str', '00:00');
@@ -508,10 +504,14 @@ function cleanupCallSession(deviceId = null) {
     }
     
     // Clean up audio subscription so next call gets a fresh subscription
+    // Bug fix: unsubscribe via /realtime WebSocket, not /phone signaling
     if (global.dolphinSignalingInstances && global.dolphinSignalingInstances[activeDeviceId]) {
         const sigInst = global.dolphinSignalingInstances[activeDeviceId];
         if (sigInst.audioSubscribedExt) {
-            try { app.realtime.unsubscribe('audio_stream/' + sigInst.audioSubscribedExt); } catch(e) {}
+            const cleanWsInst = global.dolphinWsInstances && global.dolphinWsInstances[activeDeviceId];
+            if (cleanWsInst && cleanWsInst.wsClient && cleanWsInst.wsClient.readyState === 1) {
+                try { cleanWsInst.wsClient.send(JSON.stringify({ type: 'unsub', topic: 'audio_stream/' + sigInst.audioSubscribedExt })); } catch(e) {}
+            }
             sigInst.audioSubscribedExt = null;
         }
     }
@@ -635,6 +635,16 @@ function initWebSocket(token, userId, deviceId = null) {
                 if (message.topic && message.payload) {
                     const { topic, payload } = message;
                     
+                    // Handle Audio Stream (VoIP call audio) — fast path, no UI update
+                    if (topic && topic.startsWith('audio_stream/')) {
+                        const callStatus = app.getState('call_status');
+                        if (callStatus !== 'connected') return;
+                        if (!payload || !payload.audio) return;
+                        const rate = payload.rate || 8000;
+                        app.state('hw', `audio:stream_play:${rate}:${payload.audio}`);
+                        return;
+                    }
+
                     // Handle Private Chat Messages
                     if (topic === `chat/private/${userId}` || topic.startsWith('chat/private/')) {
                         const activePartnerId = app.getState('chat_partner_id');
@@ -990,7 +1000,7 @@ app.action('hw_result:webrtc_mic_data', (action, value, deviceId) => {
         console.log(`[JS-MIC-${deviceId}] Received mic packet #${global.dolphinMicLogCounts[deviceId]} (len=${value ? value.length : 0}) from Native. isConnected=${isConnected}, partnerExt=${partnerExt}`);
     }
     
-    if (!isConnected || !partnerExt || !app.realtime || !value) return;
+    if (!isConnected || !partnerExt || !value) return;
     
     let rate = 8000;
     let audioData = value;
@@ -1003,15 +1013,20 @@ app.action('hw_result:webrtc_mic_data', (action, value, deviceId) => {
         }
     }
     
+    // Bug fix: publish audio via /realtime WebSocket (RealtimeCore pub/sub),
+    // NOT via app.realtime which goes to /phone (signalingOrchestrator doesn't handle audio_stream topics)
+    const micWsInst = global.dolphinWsInstances && global.dolphinWsInstances[deviceId];
+    if (!micWsInst || !micWsInst.wsClient || micWsInst.wsClient.readyState !== 1) return;
+    
     if (global.dolphinMicLogCounts[deviceId] % 50 === 1) {
-        console.log(`[JS-MIC-${deviceId}] Publishing packet #${global.dolphinMicLogCounts[deviceId]} to topic audio_stream/${app.getState('user_ext', deviceId)}`);
+        console.log(`[JS-MIC-${deviceId}] Publishing packet #${global.dolphinMicLogCounts[deviceId]} to topic audio_stream/${app.getState('user_ext', deviceId)} via /realtime`);
     }
     
-    app.realtime.publish('audio_stream/' + app.getState('user_ext', deviceId), {
-        from: app.getState('user_ext', deviceId),
-        audio: audioData,
-        rate: rate
-    });
+    micWsInst.wsClient.send(JSON.stringify({
+        type: 'pub',
+        topic: 'audio_stream/' + app.getState('user_ext', deviceId),
+        payload: { from: app.getState('user_ext', deviceId), audio: audioData, rate: rate }
+    }));
 });
 
 // Dialer Keypad Actions
@@ -1089,7 +1104,11 @@ async function initiateOutboundCall(targetExt) {
     
     app.state('call_status', 'outgoing');
     app.state('call_partner_ext', targetExt);
-    app.state('call_partner_name', `Extension ${targetExt}`);
+    // Look up real name from directory; fall back to Extension N
+    const outboundUsers = app.getState('directory_users') || [];
+    const outboundContact = outboundUsers.find(u => String(u.extension) === String(targetExt));
+    const outboundName = outboundContact ? (outboundContact.name || outboundContact.displayName || `Extension ${targetExt}`) : `Extension ${targetExt}`;
+    app.state('call_partner_name', outboundName);
     app.state('call_direction', 'outbound');
     app.state('call_duration_str', '00:00');
     
