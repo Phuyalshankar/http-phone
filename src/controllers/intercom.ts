@@ -1,89 +1,101 @@
 /**
  * Intercom Audio Relay
  *
- * In-memory ring-buffer that relays raw PCM frames between two extensions.
+ * In-memory ring-buffer that relays raw PCM frames (base64-encoded) between two extensions.
  *
  * DolphinIntercom.kt (Android) POSTs audio via:
  *   POST /api/intercom/audio/push
  *   Headers: X-Device-Id: <myExt>  X-Target-Id: <partnerExt>
- *   Body: raw PCM bytes (Content-Type: application/octet-stream)
+ *   Body: JSON { audio: "<base64 PCM>", rate: 8000 }
  *
  * And polls audio via:
  *   GET /api/intercom/audio/pull
  *   Headers: X-Device-Id: <myExt>  X-Target-Id: <partnerExt>
- *   Response: raw PCM bytes from partner's push buffer
+ *   Response: JSON { audio: "<base64 PCM>", rate: 8000 } or 204 if empty
  *
  * Buffer key = "<from>:<to>".  Pull reverses the key to get partner's frames.
  */
 
-const audioQueues = new Map<string, Buffer[]>();
-const MAX_QUEUE_FRAMES = 150; // ~3 seconds of 20ms frames at 16kHz
+interface AudioFrame {
+    audio: string; // base64 PCM
+    rate: number;
+}
 
-function getQueue(key: string): Buffer[] {
+// Use global to survive tsx hot-module reloads
+declare const global: any;
+if (!global.__intercomAudioQueues) {
+    global.__intercomAudioQueues = new Map<string, AudioFrame[]>();
+}
+const audioQueues: Map<string, AudioFrame[]> = global.__intercomAudioQueues;
+
+const MAX_QUEUE_FRAMES = 100;
+
+function getQueue(key: string): AudioFrame[] {
     if (!audioQueues.has(key)) audioQueues.set(key, []);
     return audioQueues.get(key)!;
 }
 
-function readRawBody(req: any): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-        const chunks: Buffer[] = [];
-        req.on('data', (chunk: Buffer) => chunks.push(chunk));
-        req.on('end', () => resolve(Buffer.concat(chunks)));
-        req.on('error', reject);
-    });
-}
-
 export async function pushAudio(ctx: any) {
-    const from = (ctx.req?.headers?.['x-device-id'] || ctx.headers?.['x-device-id'] || '').toString();
-    const to   = (ctx.req?.headers?.['x-target-id'] || ctx.headers?.['x-target-id'] || '').toString();
+    // Dolphin server.ts parses body into ctx.body before calling handler
+    const headers = ctx.req?.headers || ctx.headers || {};
+    const from = (headers['x-device-id'] || '').toString().trim();
+    const to   = (headers['x-target-id'] || '').toString().trim();
+
+    console.log(`[Intercom] PUSH from=${from} to=${to} body=${JSON.stringify(ctx.body).slice(0, 100)}`);
 
     if (!from || !to) {
-        ctx.status(400);
-        return { error: 'Missing X-Device-Id or X-Target-Id headers' };
+        // Use Dolphin's ctx.status().json() pattern
+        ctx.status(400).json({ error: 'Missing X-Device-Id or X-Target-Id headers' });
+        return;
     }
 
-    try {
-        const rawReq = ctx.req || ctx;
-        const pcm = await readRawBody(rawReq);
+    const body = ctx.body;
+    const audioB64 = (typeof body === 'object' ? body?.audio || body?.data : '') || '';
+    const rate = (typeof body === 'object' ? body?.rate : undefined) || 8000;
 
-        if (pcm.length > 0) {
-            const queue = getQueue(`${from}:${to}`);
-            queue.push(pcm);
-            if (queue.length > MAX_QUEUE_FRAMES) queue.shift();
-        }
-    } catch (e: any) {
-        ctx.status(500);
-        return { error: e.message };
+    console.log(`[Intercom] PUSH audioLen=${audioB64.length} rate=${rate}`);
+
+    if (audioB64) {
+        const queue = getQueue(`${from}:${to}`);
+        queue.push({ audio: audioB64, rate });
+        if (queue.length > MAX_QUEUE_FRAMES) queue.shift();
+        console.log(`[Intercom] Queue ${from}:${to} => ${queue.length} frames`);
     }
 
-    ctx.status(204);
-    return null;
+    // Send 204 No Content — use raw res to avoid Dolphin auto-JSON wrapping
+    ctx.res.statusCode = 204;
+    ctx.res.end();
 }
 
 export async function pullAudio(ctx: any) {
-    const me     = (ctx.req?.headers?.['x-device-id'] || ctx.headers?.['x-device-id'] || '').toString();
-    const target = (ctx.req?.headers?.['x-target-id'] || ctx.headers?.['x-target-id'] || '').toString();
+    const headers = ctx.req?.headers || ctx.headers || {};
+    const me     = (headers['x-device-id'] || '').toString().trim();
+    const target = (headers['x-target-id'] || '').toString().trim();
 
     if (!me || !target) {
-        ctx.status(400);
-        return { error: 'Missing X-Device-Id or X-Target-Id headers' };
+        ctx.status(400).json({ error: 'Missing X-Device-Id or X-Target-Id headers' });
+        return;
     }
 
-    const queue = getQueue(`${target}:${me}`);
+    const queueKey = `${target}:${me}`;
+    const queue = getQueue(queueKey);
+
+    console.log(`[Intercom] PULL me=${me} target=${target} queue(${queueKey})=${queue.length} frames`);
 
     if (queue.length === 0) {
-        ctx.status(204);
-        return null;
+        ctx.res.statusCode = 204;
+        ctx.res.end();
+        return;
     }
 
-    const frames: Buffer[] = [];
-    while (queue.length > 0) frames.push(queue.shift()!);
-    const pcm = Buffer.concat(frames);
+    const frames = queue.splice(0, queue.length);
+    const rate = frames[frames.length - 1]?.rate || 8000;
+    const allAudio = frames.map(f => f.audio).join('');
 
-    const res = ctx.res || ctx;
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Length', String(pcm.length));
-    res.statusCode = 200;
-    res.end(pcm);
-    return null;
+    const payload = JSON.stringify({ audio: allAudio, rate });
+
+    ctx.res.statusCode = 200;
+    ctx.res.setHeader('Content-Type', 'application/json');
+    ctx.res.setHeader('Content-Length', Buffer.byteLength(payload));
+    ctx.res.end(payload);
 }
