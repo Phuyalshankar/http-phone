@@ -27,6 +27,7 @@ import {
 } from '../controllers/chat.js';
 import { getTurnCredentialsHandler } from '../realtime/realtime.js';
 import { startCall, endCall, getCallHistory } from '../controllers/call.js';
+import { pushAudio, pullAudio } from '../controllers/intercom.js';
 
 export function setupRoutes() {
   const router = createDolphinRouter();
@@ -64,6 +65,11 @@ export function setupRoutes() {
   router.post('/api/calls/start', authMiddleware(), startCall);
   router.post('/api/calls/end', authMiddleware(), endCall);
   router.get('/api/calls/history', authMiddleware(), getCallHistory);
+
+  // ================= INTERCOM AUDIO RELAY =================
+  // No auth middleware — DolphinIntercom.kt sends raw PCM with no token
+  router.post('/api/intercom/audio/push', pushAudio);
+  router.get('/api/intercom/audio/pull', pullAudio);
 
   return router;
 }
