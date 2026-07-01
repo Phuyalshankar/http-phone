@@ -38,6 +38,9 @@ function getQueue(key: string): Buffer[] {
     return audioQueues.get(key)!;
 }
 
+let lastPushLog = 0;
+let lastPullLog = 0;
+
 export async function pushAudio(ctx: any) {
     const headers = ctx.req?.headers || ctx.headers || {};
     const from = (headers['x-device-id'] || '').toString().trim();
@@ -46,6 +49,12 @@ export async function pushAudio(ctx: any) {
     if (!from || !to) {
         ctx.status(400).json({ error: 'Missing X-Device-Id or X-Target-Id headers' });
         return;
+    }
+
+    const now = Date.now();
+    if (now - lastPushLog > 5000) {
+        console.log(`🎙️ [Intercom Server] pushAudio received packet from ${from} to ${to}`);
+        lastPushLog = now;
     }
 
     const body = ctx.body;
@@ -78,6 +87,12 @@ export async function pullAudio(ctx: any) {
     if (!me || !target) {
         ctx.status(400).json({ error: 'Missing X-Device-Id or X-Target-Id headers' });
         return;
+    }
+
+    const now = Date.now();
+    if (now - lastPullLog > 5000) {
+        console.log(`📡 [Intercom Server] pullAudio polling from ${me} for target ${target}`);
+        lastPullLog = now;
     }
 
     const queueKey = `${target}:${me}`;

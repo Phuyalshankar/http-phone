@@ -39,6 +39,7 @@ function saveSession(deviceId, data) {
         sessions[deviceId] = {
             isLoggedIn: true,
             accessToken: data.accessToken,
+            refreshToken: data.refreshToken || '',
             userId: data.user.id,
             userName: data.user.name,
             userExt: data.user.extension,
@@ -72,11 +73,11 @@ function loadSession(deviceId) {
         if (fs.existsSync(sessionFilePath)) {
             let sessions = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
             
-            // Clean up expired sessions from the file
+            // Clean up expired sessions ONLY if they do NOT have a refreshToken to renew them
             let changed = false;
             for (const [id, sess] of Object.entries(sessions)) {
-                if (isTokenExpired(sess.accessToken)) {
-                    console.log(`[Session] Found expired session for deviceId ${id}. Cleaning it up.`);
+                if (isTokenExpired(sess.accessToken) && !sess.refreshToken) {
+                    console.log(`[Session] Found expired session without refresh token for deviceId ${id}. Cleaning it up.`);
                     delete sessions[id];
                     changed = true;
                 }
@@ -667,13 +668,20 @@ function initWebSocket(token, userId, deviceId = null) {
                             return;
                         }
                     }
-                    console.warn(`[WS-${activeDeviceId}] Token refresh failed (${refreshRes.status}) — retrying in 8s with old token`);
+                    console.warn(`[WS-${activeDeviceId}] Token refresh failed (${refreshRes.status}) — logging out.`);
+                    app.state('auth_error', 'Session expired. Please log in again.');
+                    clearSession(activeDeviceId);
+                    if (global.dolphinActiveSessions) {
+                        delete global.dolphinActiveSessions[activeDeviceId];
+                    }
+                    handleLogout(app);
+                    return;
                 } catch (e) {
                     console.error(`[WS-${activeDeviceId}] Token refresh error:`, e.message);
                 }
             }
 
-            console.log(`[WS-${activeDeviceId}] Retrying connect in 8 seconds...`);
+            console.log(`[WS-${activeDeviceId}] Retrying connect in 2 seconds...`);
             inst.retryTimeout = setTimeout(() => {
                 app.framework.deviceContextStore.run(activeDeviceId, () => {
                     if (app.getState('isLoggedIn')) {
@@ -682,7 +690,7 @@ function initWebSocket(token, userId, deviceId = null) {
                         initWebSocket(freshToken, freshUserId, activeDeviceId);
                     }
                 });
-            }, 8000);
+            }, 2000);
         });
     });
     
@@ -930,6 +938,7 @@ app.action('app:restore_session', (action, value, deviceId) => {
         global.dolphinActiveSessions[deviceId] = {
             isLoggedIn: true,
             accessToken: session.accessToken,
+            refreshToken: session.refreshToken || '',
             userId: session.userId,
             userName: session.userName,
             userExt: session.userExt
@@ -940,6 +949,7 @@ app.action('app:restore_session', (action, value, deviceId) => {
         app.state('user_name', session.userName);
         app.state('user_ext', session.userExt);
         app.state('accessToken', session.accessToken);
+        app.state('refreshToken', session.refreshToken || '');
         
         initWebSocket(session.accessToken, session.userId, deviceId);
         initSignaling(session.accessToken, session.userExt, deviceId);
